@@ -9,10 +9,12 @@ variables:
 
 lint-and-test:
   stage: test
-  image: alpine:latest
+  image: python:3.11-alpine
   script:
-    - echo "Rodando linters e testes unitarios da aplicacao..."
-    # - npm run test / pytest / golangci-lint
+    - 'echo "Preparando ambiente de testes..."'
+    - 'pip install --no-cache-dir -r requirements.txt pytest'
+    - 'echo "Rodando testes unitarios com Pytest..."'
+    - 'pytest test_app.py -v'
   rules:
     - if: $CI_PIPELINE_SOURCE == "push"
 
