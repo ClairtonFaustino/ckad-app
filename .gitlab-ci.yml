@@ -28,7 +28,7 @@ build-and-push:
     - docker build -t $IMAGE_NAME .
     - docker push $IMAGE_NAME
   rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "master"
 
 update-gitops-repo:
   stage: deploy-gitops
@@ -48,4 +48,4 @@ update-gitops-repo:
     - 'git commit -m "chore(deploy): update ckad-app image to $IMAGE_TAG [skip ci]"'
     - 'git push origin main'
   rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "master"
