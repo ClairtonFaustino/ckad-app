@@ -49,9 +49,12 @@ build-and-push:
 
 trivy-image-scan:
   stage: build
-  image: aquasec/trivy:latest
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
   needs: ["build-and-push"]
   script:
+    - echo "Iniciando scan de vulnerabilidades na imagem..."
     - trivy image --exit-code 1 --severity CRITICAL,HIGH $IMAGE_NAME
 
 update-gitops-repo:
