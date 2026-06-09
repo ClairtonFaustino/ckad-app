@@ -1,12 +1,18 @@
 stages:
   - test
   - build
+  - deploy-preview
   - deploy-gitops
+  - stop-preview
 
 variables:
-  IMAGE_TAG: $CI_COMMIT_SHORT_SHA 
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
   IMAGE_NAME: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  GATEWAY_IP: "129.80.246.47"
+  GITOPS_REPO: "https://oauth2:${GITOPS_TOKEN}@gitlab.com/oci-project/oci-gitops.git"
+  PREVIEW_MANIFESTS: "preview/ckad-app"
 
+# --- 1. TESTES E QUALIDADE ---
 lint-and-test:
   stage: test
   image: python:3.11-alpine
@@ -17,6 +23,7 @@ lint-and-test:
     - 'pytest test_app.py -v'
   rules:
     - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
 ai-code-review:
   stage: test
@@ -32,7 +39,9 @@ ai-code-review:
   allow_failure: true
   rules:
     - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
+# --- 2. BUILD E SEGURANCA ---
 build-and-push:
   stage: build
   image: docker:24.0.5
@@ -46,6 +55,7 @@ build-and-push:
     - docker push $IMAGE_NAME
   rules:
     - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
 trivy-image-scan:
   stage: build
@@ -56,7 +66,112 @@ trivy-image-scan:
   script:
     - echo "Iniciando scan de vulnerabilidades na imagem..."
     - trivy image --exit-code 1 --severity CRITICAL,HIGH $IMAGE_NAME
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
+# --- 3. AMBIENTES EFEMEROS (MERGE REQUESTS) ---
+deploy-preview:
+  stage: deploy-preview
+  image: bitnami/kubectl:1.31
+  needs: ["build-and-push"]
+  variables:
+    NAMESPACE: "ckad-app-pr-${CI_MERGE_REQUEST_IID}"
+  before_script:
+    - install_packages git curl
+    - mkdir -p ~/.kube
+    - echo "$KUBECONFIG_CONTENT" | base64 -d > ~/.kube/config
+  script:
+    - |
+      if [ -z "$KUBECONFIG_CONTENT" ]; then
+        echo "Erro: defina KUBECONFIG_CONTENT (kubeconfig em base64) no GitLab CI/CD."
+        exit 1
+      fi
+    - |
+      if [ -z "$GITOPS_TOKEN" ]; then
+        echo "Erro: defina GITOPS_TOKEN com permissao de read no repo gitops."
+        exit 1
+      fi
+    - GATEWAY_IP_DASHED=$(echo "$GATEWAY_IP" | tr '.' '-')
+    - export NAMESPACE="$NAMESPACE"
+    - export PREVIEW_HOST="pr-${CI_MERGE_REQUEST_IID}.${GATEWAY_IP_DASHED}.nip.io"
+    - export PREVIEW_URL="http://${PREVIEW_HOST}"
+    - echo "PREVIEW_URL=${PREVIEW_URL}" >> deploy.env
+    - echo "=========================================="
+    - echo " Preview MR !${CI_MERGE_REQUEST_IID}"
+    - echo " URL ${PREVIEW_URL}"
+    - echo "=========================================="
+    - echo "Clonando manifests de preview do GitOps..."
+    - git clone --depth 1 "$GITOPS_REPO" oci-gitops
+    - echo "Criando namespace ${NAMESPACE}..."
+    - |
+      sed -e "s/\${NAMESPACE}/$NAMESPACE/g" \
+        oci-gitops/${PREVIEW_MANIFESTS}/01-namespace.yaml | kubectl apply -f -
+    - echo "Configurando pull secret do GitLab Registry..."
+    - |
+      kubectl create secret docker-registry gitlab-registry \
+        --docker-server="$CI_REGISTRY" \
+        --docker-username="$CI_REGISTRY_USER" \
+        --docker-password="$CI_REGISTRY_PASSWORD" \
+        --namespace="$NAMESPACE" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    - echo "Aplicando manifests de preview a partir do GitOps..."
+    - |
+      for manifest in oci-gitops/${PREVIEW_MANIFESTS}/0[2-9]-*.yaml; do
+        sed \
+          -e "s/\${NAMESPACE}/$NAMESPACE/g" \
+          -e "s/\${PREVIEW_HOST}/$PREVIEW_HOST/g" \
+          -e "s|\${IMAGE_NAME}|$IMAGE_NAME|g" \
+          -e "s/\${MR_IID}/$CI_MERGE_REQUEST_IID/g" \
+          "$manifest" | kubectl apply -f -
+      done
+    - kubectl rollout status deployment/ckad-app -n "$NAMESPACE" --timeout=120s
+    - echo "Validando rota HTTP via Gateway..."
+    - |
+      for i in $(seq 1 12); do
+        if curl -sf --max-time 10 -H "Host: ${PREVIEW_HOST}" "http://${GATEWAY_IP}/"; then
+          echo "Preview respondendo com sucesso."
+          break
+        fi
+        if [ "$i" -eq 12 ]; then
+          echo "Erro: preview nao respondeu apos 60s."
+          kubectl get httproute,deploy,svc,pods -n "$NAMESPACE"
+          exit 1
+        fi
+        echo "Aguardando preview... tentativa ${i}/12"
+        sleep 5
+      done
+    - echo "Preview disponivel em ${PREVIEW_URL}"
+  artifacts:
+    reports:
+      dotenv: deploy.env
+  environment:
+    name: preview/mr-${CI_MERGE_REQUEST_IID}
+    url: $PREVIEW_URL
+    on_stop: stop-preview
+    auto_stop_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+stop-preview:
+  stage: stop-preview
+  image: bitnami/kubectl:1.31
+  variables:
+    NAMESPACE: "ckad-app-pr-${CI_MERGE_REQUEST_IID}"
+  before_script:
+    - mkdir -p ~/.kube
+    - echo "$KUBECONFIG_CONTENT" | base64 -d > ~/.kube/config
+  script:
+    - echo "Destruindo ambiente efemero ${NAMESPACE}..."
+    - kubectl delete namespace "$NAMESPACE" --wait=false
+  environment:
+    name: preview/mr-${CI_MERGE_REQUEST_IID}
+    action: stop
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+
+# --- 4. DEPLOY PRODUCAO (GITOPS/MASTER) ---
 update-gitops-repo:
   stage: deploy-gitops
   image: alpine:latest
@@ -67,10 +182,8 @@ update-gitops-repo:
   script:
     - 'git clone https://oauth2:${GITOPS_TOKEN}@gitlab.com/oci-project/oci-gitops.git'
     - 'cd oci-gitops'
-    
     - 'echo "Atualizando tag para $IMAGE_TAG no ambiente..."'
     - 'sed -i "s/tag:.*/tag: $IMAGE_TAG/g" apps/ckad-app-values.yaml'
-    
     - 'git add apps/ckad-app-values.yaml'
     - 'git commit -m "chore(deploy): update ckad-app image to $IMAGE_TAG [skip ci]"'
     - 'git push origin master'
