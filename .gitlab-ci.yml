@@ -126,18 +126,29 @@ deploy-preview:
           "$manifest" | kubectl apply -f -
       done
     - kubectl rollout status deployment/ckad-app -n "$NAMESPACE" --timeout=120s
-    - echo "Validando rota HTTP via Gateway..."
+    - echo "Validando rota HTTP via Gateway (in-cluster)..."
     - |
       for i in $(seq 1 12); do
-        if curl -sf --max-time 10 -H "Host: ${PREVIEW_HOST}" "http://${GATEWAY_IP}/"; then
+        kubectl delete pod preview-check -n "$NAMESPACE" --ignore-not-found --wait=true 2>/dev/null || true
+        kubectl run preview-check -n "$NAMESPACE" --restart=Never --image=curlimages/curl -- \
+          curl -sf --max-time 10 -H "Host: ${PREVIEW_HOST}" "http://${GATEWAY_IP}/"
+
+        if kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
+          pod/preview-check -n "$NAMESPACE" --timeout=20s 2>/dev/null; then
+          kubectl logs preview-check -n "$NAMESPACE"
           echo "Preview respondendo com sucesso."
+          kubectl delete pod preview-check -n "$NAMESPACE" --ignore-not-found
           break
         fi
+
         if [ "$i" -eq 12 ]; then
           echo "Erro: preview nao respondeu apos 60s."
+          kubectl logs preview-check -n "$NAMESPACE" 2>/dev/null || true
           kubectl get httproute,deploy,svc,pods -n "$NAMESPACE"
+          kubectl delete pod preview-check -n "$NAMESPACE" --ignore-not-found
           exit 1
         fi
+
         echo "Aguardando preview... tentativa ${i}/12"
         sleep 5
       done
