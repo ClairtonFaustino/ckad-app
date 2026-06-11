@@ -126,31 +126,55 @@ deploy-preview:
           "$manifest" | kubectl apply -f -
       done
     - kubectl rollout status deployment/ckad-app -n "$NAMESPACE" --timeout=120s
-    - echo "Validando rota HTTP via Gateway (in-cluster)..."
+    - echo "Aguardando HTTPRoute ser aceito pelo Gateway..."
     - |
-      for i in $(seq 1 12); do
-        kubectl delete pod preview-check -n "$NAMESPACE" --ignore-not-found --wait=true 2>/dev/null || true
-        kubectl run preview-check -n "$NAMESPACE" --restart=Never --image=curlimages/curl -- \
-          curl -sf --max-time 10 -H "Host: ${PREVIEW_HOST}" "http://${GATEWAY_IP}/"
-
-        if kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
-          pod/preview-check -n "$NAMESPACE" --timeout=20s 2>/dev/null; then
-          kubectl logs preview-check -n "$NAMESPACE"
-          echo "Preview respondendo com sucesso."
-          kubectl delete pod preview-check -n "$NAMESPACE" --ignore-not-found
+      for i in $(seq 1 30); do
+        accepted=$(kubectl get httproute ckad-app-preview -n "$NAMESPACE" \
+          -o jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].status}' 2>/dev/null || true)
+        if [ "$accepted" = "True" ]; then
+          echo "HTTPRoute aceito pelo Gateway."
           break
         fi
-
-        if [ "$i" -eq 12 ]; then
-          echo "Erro: preview nao respondeu apos 60s."
-          kubectl logs preview-check -n "$NAMESPACE" 2>/dev/null || true
-          kubectl get httproute,deploy,svc,pods -n "$NAMESPACE"
-          kubectl delete pod preview-check -n "$NAMESPACE" --ignore-not-found
+        if [ "$i" -eq 30 ]; then
+          echo "Erro: HTTPRoute nao foi aceito a tempo."
+          kubectl describe httproute ckad-app-preview -n "$NAMESPACE"
           exit 1
         fi
+        sleep 2
+      done
+    - echo "Validando rota HTTP via Gateway (in-cluster)..."
+    - |
+      CHECK_POD="preview-check-${CI_JOB_ID}"
+      kubectl delete pod "$CHECK_POD" -n "$NAMESPACE" --ignore-not-found --wait=false 2>/dev/null || true
+      kubectl run "$CHECK_POD" -n "$NAMESPACE" --restart=Never --image=curlimages/curl --command -- \
+        sh -c 'curl -sf --max-time 10 -H "Host: '"${PREVIEW_HOST}"'" http://'"${GATEWAY_IP}"'/'
 
-        echo "Aguardando preview... tentativa ${i}/12"
-        sleep 5
+      for i in $(seq 1 30); do
+        phase=$(kubectl get pod "$CHECK_POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+        if [ "$phase" = "Succeeded" ]; then
+          kubectl logs "$CHECK_POD" -n "$NAMESPACE"
+          echo "Preview respondendo com sucesso."
+          kubectl delete pod "$CHECK_POD" -n "$NAMESPACE" --ignore-not-found --wait=false
+          break
+        fi
+        if [ "$phase" = "Failed" ]; then
+          echo "Erro: curl in-cluster falhou."
+          kubectl logs "$CHECK_POD" -n "$NAMESPACE" 2>/dev/null || true
+          kubectl describe pod "$CHECK_POD" -n "$NAMESPACE"
+          kubectl get httproute,deploy,svc,pods -n "$NAMESPACE"
+          kubectl delete pod "$CHECK_POD" -n "$NAMESPACE" --ignore-not-found --wait=false
+          exit 1
+        fi
+        if [ "$i" -eq 30 ]; then
+          echo "Erro: preview nao respondeu apos 60s."
+          kubectl logs "$CHECK_POD" -n "$NAMESPACE" 2>/dev/null || true
+          kubectl describe pod "$CHECK_POD" -n "$NAMESPACE" 2>/dev/null || true
+          kubectl get httproute,deploy,svc,pods -n "$NAMESPACE"
+          kubectl delete pod "$CHECK_POD" -n "$NAMESPACE" --ignore-not-found --wait=false
+          exit 1
+        fi
+        echo "Aguardando preview... tentativa ${i}/30"
+        sleep 2
       done
     - echo "Preview disponivel em ${PREVIEW_URL}"
   artifacts:
