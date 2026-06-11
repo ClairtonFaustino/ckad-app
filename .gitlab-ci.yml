@@ -95,7 +95,17 @@ deploy-preview:
     - GATEWAY_IP_DASHED=$(echo "$GATEWAY_IP" | tr '.' '-')
     - export NAMESPACE="$NAMESPACE"
     - export PREVIEW_HOST="pr-${CI_MERGE_REQUEST_IID}.${GATEWAY_IP_DASHED}.nip.io"
-    - export PREVIEW_URL="http://${PREVIEW_HOST}"
+    - |
+      export ENVOY_NODEPORT=$(kubectl get svc -n envoy-gateway-system \
+        -l gateway.envoyproxy.io/owning-gateway-name=public-gateway \
+        -o jsonpath='{.items[0].spec.ports[?(@.port==80)].nodePort}')
+      if [ -z "$ENVOY_NODEPORT" ]; then
+        echo "Erro: NodePort do Envoy Gateway nao encontrada."
+        kubectl get svc -n envoy-gateway-system
+        exit 1
+      fi
+      echo "Envoy Gateway NodePort: ${ENVOY_NODEPORT}"
+    - export PREVIEW_URL="http://${PREVIEW_HOST}:${ENVOY_NODEPORT}"
     - echo "PREVIEW_URL=${PREVIEW_URL}" >> deploy.env
     - echo "=========================================="
     - echo " Preview MR !${CI_MERGE_REQUEST_IID}"
