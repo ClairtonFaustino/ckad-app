@@ -73,12 +73,12 @@ trivy-image-scan:
 # --- 3. AMBIENTES EFEMEROS (MERGE REQUESTS) ---
 deploy-preview:
   stage: deploy-preview
-  image: bitnami/kubectl:1.31
+  image: alpine/k8s:1.31.13
   needs: ["build-and-push"]
   variables:
     NAMESPACE: "ckad-app-pr-${CI_MERGE_REQUEST_IID}"
   before_script:
-    - install_packages git curl
+    - apk add --no-cache git
     - mkdir -p ~/.kube
     - echo "$KUBECONFIG_CONTENT" | base64 -d > ~/.kube/config
   script:
@@ -155,7 +155,7 @@ deploy-preview:
 
 stop-preview:
   stage: stop-preview
-  image: bitnami/kubectl:1.31
+  image: alpine/k8s:1.31.13
   variables:
     NAMESPACE: "ckad-app-pr-${CI_MERGE_REQUEST_IID}"
   before_script:
